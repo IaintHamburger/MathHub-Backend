@@ -5,7 +5,7 @@
 (網站仍處於開發階段中，如果有興趣的話歡迎聯繫我！）  
 
 ## 貢獻方式  
-可參閱貢獻指南  
+可參閱貢獻指南
   
 ## 聯繫方式/Contact Info:  
 - Discord: IaintHamburger  
