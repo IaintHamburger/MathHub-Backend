@@ -1,63 +1,238 @@
 import express, { Router, Request, Response } from 'express'
 import { pool } from '../modules/db.js'
 import { QueryResult } from 'pg'
+import { QuestionType, Question, QuestionVariableType, QuestionVariable, AnswerType, Answer } from '../modules/quest.js'
+import { AuthTokenPayload, TokenName, validateAuthToken } from '../modules/token.js'
+import { HttpError, HttpStatusCode } from '../modules/http_status_code.js'
+import IsolatedVM from 'isolated-vm'
 
 const router: Router = express.Router()
 
-router.get('/getList', async (req: Request<{}, {}, {}, { begin: string, end: string }>, res: Response) => {
+router.post('/getList', async (req: Request<{}, {}, { begin: number, end: number }>, res: Response) => {
     try {
-        const begin: number = req.query.begin ? parseInt(req.query.begin) : 0
-        const end: number = req.query.end ? parseInt(req.query.end) : 10
+        // Token 驗證
+        const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
+
+        // 用戶組驗證
+        const role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '一般使用者'")
+        if (auth_payload.role < role_result.rows[0].id) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
+        }
+
+        // 查詢題目資料
+        const begin: number = req.body.begin
+        const end: number = req.body.end
 
         if (isNaN(begin) || isNaN(end) || end < begin) {
-            throw new Error("Invalid query parameters.")
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.BAD_REQUEST, '查詢範圍錯誤')
         }
 
-        const result: QueryResult = await pool.query('SELECT ID, TITLE, TAGS, PUBLISHER, PUBLISH_TIME FROM QUEST ORDER BY PUBLISH_TIME LIMIT $1 OFFSET $2', [Math.max(end - begin + 1, 1), Math.max(begin, 0)])
-        res.status(200).json(result.rows)
+        const result: QueryResult = await pool.query(`
+            SELECT q.id, q.title, q.publish_time, COALESCE(a.nickname, a.username) AS publisher_name
+            FROM test_schema.quest q
+            JOIN test_schema.auth a ON q.publisher_id = a.id
+            WHERE q.status = 1
+            ORDER BY publish_time
+            LIMIT $1 OFFSET $2`,
+            [Math.max(end - begin + 1, 1), Math.max(begin, 0)]
+        )
+
+        res.status(HttpStatusCode.SUCCESSFUL_RESPONSE.OK).json(result.rows)
     }
     catch (error) {
         console.error(error)
-        res.status(404).send(error)
+        if (error instanceof HttpError) {
+            res.status(error.status_code).send(error.message)
+            return
+        }
+
+        res.sendStatus(HttpStatusCode.SERVER_ERROR_RESPONSE.INTERNAL_SERVER_ERROR)
     }
 })
 
-// questId 使用 postgreSQL 的 uuid_generate_v4() 函數自動產生
-// 根據 questId 查詢擁有相應 ID 的資料 (題目)，查詢資料的 ID, TITLE, QUESTION 欄位值
 // 將查詢結果以 JSON 格式傳送到前端頁面
-// URL 範例: http://localhost:5001/quest/getQuest/e7325139-0266-475c-a5ab-d4e3dbf524ff
-router.get('/getQuest/:questId', async (req: Request<{ questId: string }>, res: Response) => {
+router.post('/getQuest', async (req: Request<{}, {}, { quest_id: string }>, res: Response) => {
+    const isolate: IsolatedVM.Isolate = new IsolatedVM.Isolate({ memoryLimit: 128 })
+
     try {
-        const questId: string = req.params.questId
-        const result: QueryResult = await pool.query('SELECT TITLE, QUESTION FROM QUEST WHERE ID = $1', [questId])
-        res.status(200).json(result.rows[0])
+        // Token 驗證
+        const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
+
+        // 用戶組驗證
+        const role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '一般使用者'")
+        if (auth_payload.role < role_result.rows[0].id) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
+        }
+
+        // 查詢題目內容
+        const quest_id: string = req.body.quest_id
+        const result: QueryResult = await pool.query(`
+            SELECT code, title, question, question_var FROM test_schema.quest
+            WHERE id = $1 AND status = 1`,
+            [quest_id]
+        )
+
+        if (result.rows.length === 0) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.NOT_FOUND, '未找到題目資料')
+        }
+
+        let quest: { code: string, title: string, question: { type: string, content: string }[], question_var: { type: string, sign: string, content: string }[] } = result.rows[0]
+
+        const context: IsolatedVM.Context = await isolate.createContext()
+        const jail = context.global
+        quest.question_var = await Promise.all(
+            quest.question_var.map(async (el) => {
+                if (el.type === QuestionVariableType.FUNCTION) {
+                    const script = await isolate.compileScript(`(${el.content})()`)
+                    const result = await script.run(context)
+                    return {
+                        type: el.type,
+                        sign: el.sign,
+                        content: result
+                    }
+                }
+                else {
+                    return el
+                }
+            })
+        )
+        res.status(HttpStatusCode.SUCCESSFUL_RESPONSE.OK).json(result.rows[0])
     }
     catch (error) {
         console.error(error)
-        res.status(404).send(error)
+        if (error instanceof HttpError) {
+            res.status(error.status_code).send(error.message)
+            return
+        }
+
+        res.sendStatus(HttpStatusCode.SERVER_ERROR_RESPONSE.INTERNAL_SERVER_ERROR)
+    }
+    finally {
+        isolate.dispose()
     }
 })
 
-// 使用 query string 方法傳送解答到後端伺服器
 // 比較題目資料中的答案，並返回結果
-// URL 範例: http://localhost:5001/quest/answerQuest/e7325139-0266-475c-a5ab-d4e3dbf524ff?answer=2
-// 建議: 使用 POST 方法取得解答較有彈性
-router.get('/answerQuest/:questId', async (req: Request<{ questId: string }, {}, {}, { answer: string }>, res: Response) => {
+router.post('/answerQuest', async (req: Request<{}, {}, { quest_id: string, question_var: any[], answer: string[] }>, res: Response) => {
+    const isolate: IsolatedVM.Isolate = new IsolatedVM.Isolate({ memoryLimit: 128 })
+
     try {
-        const questId: string = req.params.questId
-        const user_answer: string = req.query.answer
-        const result: QueryResult = await pool.query('SELECT ANSWER FROM QUEST WHERE ID = $1', [questId])
-        const quest_answer: { "answer": string } = result.rows[0]
-        if (user_answer === quest_answer.answer) {
-            res.status(200).send('正確')
+        // Token 驗證
+        const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
+
+        // 用戶組驗證
+        const role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '一般使用者'")
+        if (auth_payload.role < role_result.rows[0].id) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
+        }
+
+        // 查詢解答資料
+        const { quest_id, question_var = [], answer = [] } = req.body
+        const answer_result: QueryResult = await pool.query('SELECT answer FROM test_schema.quest WHERE id = $1', [quest_id])
+
+        if (answer_result.rows.length === 0) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.NOT_FOUND, '未找到題目資料')
+        }
+
+        let answer_list: Answer[] = answer_result.rows[0].answer
+
+        const context: IsolatedVM.Context = await isolate.createContext()
+        const jail = context.global
+        answer_list = await Promise.all(
+            answer_list.map(async (el) => {
+                if (el.type === AnswerType.FUNCTION) {
+                    const script = await isolate.compileScript(`(${el.content})`)
+                    const fn = await script.run(context)
+                    const result = await fn.apply(undefined, question_var.map(value => new IsolatedVM.ExternalCopy(value).copyInto()))
+                    return result
+                }
+                else if (el.type === AnswerType.TEXT) {
+                    return el.content
+                }
+            })
+        )
+
+        // 比對答案
+        const is_correct = answer_list.length === answer.length && answer_list.every((val, idx) => String(val) === String(answer[idx]));
+
+        if (is_correct) {
+            res.status(HttpStatusCode.SUCCESSFUL_RESPONSE.OK).send('回答正確')
         }
         else {
-            res.status(200).send('錯誤')
+            res.status(HttpStatusCode.SUCCESSFUL_RESPONSE.OK).send('回答錯誤')
         }
+
+        return
     }
     catch (error) {
         console.error(error)
-        res.status(404).send(error)
+        if (error instanceof HttpError) {
+            res.status(error.status_code).send(error.message)
+            return
+        }
+
+        res.sendStatus(HttpStatusCode.SERVER_ERROR_RESPONSE.INTERNAL_SERVER_ERROR)
+    }
+    finally {
+        isolate.dispose()
+    }
+})
+
+router.post('/newQuest', async (req: Request<{}, {}, { code: string, title: string, question: { type: string, content: string }[], question_var: { type: string, sign: string, content: string }[], answer: { type: string, content: string }[], tags: string[] }>, res: Response) => {
+    try {
+        // Token 驗證
+        const auth_payload: AuthTokenPayload = validateAuthToken(req.cookies[TokenName.AUTH])
+
+        // 用戶組驗證
+        const admin_role_result: QueryResult = await pool.query("SELECT id FROM test_schema.auth_role_type WHERE name = '管理員'")
+        if (auth_payload.role < admin_role_result.rows[0].id) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.FORBIDDEN, '用戶權限不足')
+        }
+
+        // 檢查題目資料
+        const { code, title, question = [], question_var = [], answer = [] } = req.body
+        const question_list: Question[] = question.map(el => new Question(el.type, el.content))
+        const question_var_list: QuestionVariable[] = question_var.map(el => new QuestionVariable(el.type, el.sign, el.content))
+        const answer_list: Answer[] = answer.map(el => new Answer(el.type, el.content))
+
+        if (
+            !question_list.every(el => el.type !== QuestionType.UNDEFINED) ||
+            !question_var_list.every(el => el.type !== QuestionVariableType.UNDEFINED) ||
+            !answer_list.every(el => el.type !== AnswerType.UNDEFINED)
+        ) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.BAD_REQUEST, '資料錯誤')
+        }
+
+        // 題目編號重複檢查
+        const result: QueryResult = await pool.query('SELECT 1 FROM test_schema.quest WHERE code = $1', [code])
+        if (result.rows.length > 0) {
+            throw new HttpError(HttpStatusCode.CLIENT_ERROR_RESPONSE.BAD_REQUEST, '重複編號')
+        }
+
+        await pool.query(
+            `INSERT INTO test_schema.quest 
+            (code, title, question, question_var, answer, publisher_id) VALUES
+            ($1, $2, $3, $4, $5, (SELECT id FROM test_schema.auth WHERE username = $6))`,
+            [
+                code,
+                title,
+                JSON.stringify(question_list),
+                JSON.stringify(question_var_list),
+                JSON.stringify(answer_list),
+                auth_payload.username
+            ]
+        )
+
+        res.sendStatus(HttpStatusCode.SUCCESSFUL_RESPONSE.CREATED)
+    }
+    catch (error) {
+        console.error(error)
+        if (error instanceof HttpError) {
+            res.status(error.status_code).send(error.message)
+            return
+        }
+
+        res.sendStatus(HttpStatusCode.SERVER_ERROR_RESPONSE.INTERNAL_SERVER_ERROR)
     }
 })
 

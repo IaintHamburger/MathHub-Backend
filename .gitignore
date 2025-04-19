@@ -140,3 +140,4 @@ dist/
 .DS_store
 Frontend/client/
 client/
+.other/
