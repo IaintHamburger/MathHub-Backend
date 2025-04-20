@@ -1,4 +1,4 @@
-import dotenv from 'dotenv'
+import * as dotenv from 'dotenv'
 import { Pool } from 'pg'
 import process from 'node:process'
 import { EventEmitter } from 'node:events'
@@ -10,7 +10,7 @@ export const pool: Pool = new Pool({
     user: process.env.DB_USERNAME,
     host: process.env.DB_HOSTNAME,
     database: process.env.DB_NAME,
-    password: '',
+    password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '5432'),
     max: parseInt(process.env.DB_MAX_CONNECT || '10'),
     idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT || '60000'),

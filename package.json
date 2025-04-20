@@ -23,7 +23,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "pg": "^8.14.0",
+    "pg": "^8.14.1",
     "react-latex-next": "^3.0.0"
   },
   "devDependencies": {
