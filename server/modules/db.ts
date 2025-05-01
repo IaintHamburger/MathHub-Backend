@@ -1,4 +1,4 @@
-import * as dotenv from 'dotenv'
+import dotenv from 'dotenv'
 import { Pool } from 'pg'
 import process from 'node:process'
 import { EventEmitter } from 'node:events'

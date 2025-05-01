@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node ./build/server.js",
-    "compile": "npx tsc --build",
+    "compile": "npx tsc",
     "watch": "npx tsc --watch",
     "lint": "biome lint",
     "lint:fix": "biome lint --fix",
@@ -23,6 +23,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "isolated-vm": "^5.0.4",
     "pg": "^8.14.1",
     "react-latex-next": "^3.0.0"
   },
